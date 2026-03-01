@@ -50,7 +50,7 @@ W1_DEVICE_PATH = '/sys/bus/w1/devices/'
 
 # Serial Configuration for Moisture & pH Sensors
 MOISTURE_SERIAL_PORT = '/dev/ttyUSB0' 
-PH_SERIAL_PORT = '/dev/ttyUSB1' # Assumed separate port to avoid serial collision
+PH_SERIAL_PORT = '/dev/ttyUSB0' # Reverted back to ttyUSB0 as requested
 SERIAL_BAUD_RATE = 9600
 SERIAL_TIMEOUT = 3.0        
 
