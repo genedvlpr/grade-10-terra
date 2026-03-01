@@ -23,23 +23,6 @@ def _patched_fdopen(fd, mode='r', *args, **kwargs):
         mode = mode.replace('U', '')
     return _orig_fdopen(fd, mode, *args, **kwargs)
 os.fdopen = _patched_fdopen
-
-# ==============================================================================
-# PyBleno 64-bit OS Compatibility Patch (Fixes Errno 22 Invalid argument)
-# ==============================================================================
-import socket
-import struct
-
-_orig_setsockopt = socket.socket.setsockopt
-def _patched_setsockopt(self, level, optname, value):
-    if optname == getattr(socket, 'HCI_FILTER', 2) and isinstance(value, bytes) and len(value) == 26:
-        try:
-            unpacked = struct.unpack('<LLLH', value)
-            value = struct.pack('<IIIH', unpacked[0], unpacked[1], unpacked[2], unpacked[3])
-        except Exception:
-            pass
-    return _orig_setsockopt(self, level, optname, value)
-socket.socket.setsockopt = _patched_setsockopt
 # ==============================================================================
 
 # Import necessary Blinka/CircuitPython libraries for DHT
