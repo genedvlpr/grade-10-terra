@@ -13,6 +13,17 @@ import os
 import serial.tools.list_ports 
 from datetime import datetime
 
+# --- PyBleno Python 3.11+ Compatibility Patch ---
+# pybleno uses 'rU' mode in os.fdopen which was removed in Python 3.11.
+# This intercepts that call and safely removes the 'U' flag on the fly.
+_orig_fdopen = os.fdopen
+def _patched_fdopen(fd, mode='r', *args, **kwargs):
+    if isinstance(mode, str) and 'U' in mode:
+        mode = mode.replace('U', '')
+    return _orig_fdopen(fd, mode, *args, **kwargs)
+os.fdopen = _patched_fdopen
+# ------------------------------------------------
+
 # Import necessary Blinka/CircuitPython libraries for DHT
 from adafruit_blinka.microcontroller.bcm283x.pin import Pin
 from adafruit_dht import DHT11, DHT22
