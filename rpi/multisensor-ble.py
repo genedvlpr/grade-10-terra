@@ -13,23 +13,23 @@ import os
 import serial.tools.list_ports 
 from datetime import datetime
 
-# --- PyBleno Python 3.11+ Compatibility Patch ---
-# pybleno uses 'rU' mode in os.fdopen which was removed in Python 3.11.
-# This intercepts that call and safely removes the 'U' flag on the fly.
+# ==============================================================================
+# PyBleno Python 3.11+ Compatibility Patch (Fixes the 'rU' Error)
+# MUST BE PLACED BEFORE IMPORTING PYBLENO
+# ==============================================================================
 _orig_fdopen = os.fdopen
 def _patched_fdopen(fd, mode='r', *args, **kwargs):
     if isinstance(mode, str) and 'U' in mode:
         mode = mode.replace('U', '')
     return _orig_fdopen(fd, mode, *args, **kwargs)
 os.fdopen = _patched_fdopen
-# ------------------------------------------------
+# ==============================================================================
 
 # Import necessary Blinka/CircuitPython libraries for DHT
 from adafruit_blinka.microcontroller.bcm283x.pin import Pin
 from adafruit_dht import DHT11, DHT22
 
 # Import PyBleno for Bluetooth Low Energy
-# Install via: pip3 install pybleno
 from pybleno import Bleno, BlenoPrimaryService, Characteristic
 
 # --- Configuration ---
@@ -50,7 +50,7 @@ W1_DEVICE_PATH = '/sys/bus/w1/devices/'
 
 # Serial Configuration for Moisture & pH Sensors
 MOISTURE_SERIAL_PORT = '/dev/ttyUSB0' 
-PH_SERIAL_PORT = '/dev/ttyUSB0' # Reverted back to ttyUSB0 as requested
+PH_SERIAL_PORT = '/dev/ttyUSB0' 
 SERIAL_BAUD_RATE = 9600
 SERIAL_TIMEOUT = 3.0        
 
@@ -83,11 +83,11 @@ class SensorDataCharacteristic(Characteristic):
         callback(Characteristic.RESULT_SUCCESS, self._value)
 
     def onSubscribe(self, maxValueSize, updateValueCallback):
-        print("BLE: Device subscribed to sensor notifications.")
+        print("\n[BLE] Device subscribed to sensor notifications!")
         self._updateValueCallback = updateValueCallback
 
     def onUnsubscribe(self):
-        print("BLE: Device unsubscribed.")
+        print("\n[BLE] Device unsubscribed.")
         self._updateValueCallback = None
 
     def update_data(self, json_str):
@@ -100,9 +100,10 @@ sensor_char = SensorDataCharacteristic()
 
 def onStateChange(state):
     if state == 'poweredOn':
-        print(f"BLE powered on. Advertising as '{BLE_DEVICE_NAME}'...")
+        print(f"[BLE] Powered on. Advertising as '{BLE_DEVICE_NAME}'...")
         bleno.startAdvertising(BLE_DEVICE_NAME, [TARGET_SERVICE_UUID])
     else:
+        print(f"[BLE] State changed to: {state}. Stopping advertising.")
         bleno.stopAdvertising()
 
 def onAdvertisingStart(error):
@@ -113,6 +114,8 @@ def onAdvertisingStart(error):
                 'characteristics': [sensor_char]
             })
         ])
+    else:
+        print(f"[BLE] Advertising failed: {error}")
 
 bleno.on('stateChange', onStateChange)
 bleno.on('advertisingStart', onAdvertisingStart)
@@ -213,7 +216,7 @@ if __name__ == '__main__':
 
     try:
         while True:
-            # 1. Read all sensors
+            # 1. Read all sensors sequentially
             dht_data = get_dht_data()
             ds18b20_data = get_ds18b20_data()
             moisture_data = get_moisture_data()
@@ -256,8 +259,11 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         print("\nScript stopped by user. Shutting down BLE...")
-        bleno.stopAdvertising()
-        bleno.disconnect()
+        try:
+            bleno.stopAdvertising()
+            bleno.disconnect()
+        except Exception:
+            pass # Ignore network down errors on shutdown
         print("Done.")
 
     except Exception as e:
