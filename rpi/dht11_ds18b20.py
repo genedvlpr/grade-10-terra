@@ -1,216 +1,176 @@
 #!/usr/bin/env python3
+#
+# This is a full, self-contained Python script to read data from two types of sensors:
+# 1. DHT Sensor (DHT11 or DHT22) for Temperature and Humidity.
+# 2. DS18B20 Sensor for Temperature using the One-Wire protocol.
+#
+# Prerequisites:
+# - Installation: pip3 install adafruit-circuitpython-dht
+# - Configuration: One-Wire MUST be enabled via 'sudo raspi-config'.
+#
+# Wiring Checklist:
+# - DS18B20 Data -> BCM 4 (Physical Pin 7), with 4.7kΩ pull-up resistor.
+# - DHT Data -> BCM 17 (Physical Pin 11).
+#
 
-import board
-import adafruit_dht
-import os
-import glob
 import time
 import json
 import traceback
+import glob
+# We need to import the Pin definition for Blinka compatibility
+from adafruit_blinka.microcontroller.bcm283x.pin import Pin 
+import adafruit_dht
+from adafruit_dht import DHT11, DHT22 # Import both sensor classes
 
-# --- Sensor Configuration ---
-SENSOR_ID = "RPI_SENSOR_STATION"
+# --- Configuration ---
+# BCM 17 is chosen for DHT to avoid conflict with the default One-Wire pin BCM 4.
+DHT_PIN = Pin(17) 
+SENSOR_ID = "RPI_SENSOR_1" 
 
-# DHT11 Configuration
-DHT_PIN = board.D4  # GPIO4, Physical pin 7
-DHT_SENSOR_TYPE = adafruit_dht.DHT11
+# --- CRITICAL: CHOOSE THE CORRECT SENSOR TYPE ---
+# The primary reason for the "DHT sensor not found" error is selecting the wrong class.
+# UNCOMMENT ONE LINE below that matches your sensor:
+# The blue sensor is DHT11, the white sensor is DHT22 (AM2302).
 
-# DS18B20 Configuration (One-Wire)
-ONE_WIRE_BASE_DIR = '/sys/bus/w1/devices/'
+SENSOR_TYPE = DHT11  # <-- CHECK THIS: Is this correct for your sensor? (Currently set to DHT11)
+# SENSOR_TYPE = DHT22 # <-- Uncomment this if you have a DHT22 (white sensor)
 
-# Initialize DHT11 device
-dhtDevice = adafruit_dht.DHT11(DHT_PIN)
+# --- Initialization ---
+dhtDevice = None
+try:
+    # Initialize the DHT device with the selected type and pin
+    dhtDevice = SENSOR_TYPE(DHT_PIN)
+    print(f"✅ {SENSOR_TYPE.__name__} sensor initialized on BCM {DHT_PIN.id}")
+except ValueError as e:
+    # This usually indicates a setup issue or a conflict
+    print(f"⚠️ {SENSOR_TYPE.__name__} Initialization Error: {e}")
 
-def find_ds18b20_sensors():
-    """Find all connected DS18B20 sensors"""
-    try:
-        device_folders = glob.glob(ONE_WIRE_BASE_DIR + '28*')
-        sensors = {}
-        for folder in device_folders:
-            sensor_id = os.path.basename(folder)
-            sensors[sensor_id] = folder + '/w1_slave'
-        return sensors
-    except Exception as e:
-        print(f"Error finding DS18B20 sensors: {e}")
-        return {}
-
-def read_ds18b20_raw(device_file):
-    """Read raw data from DS18B20 sensor"""
-    try:
-        with open(device_file, 'r') as f:
-            lines = f.readlines()
-        return lines
-    except Exception as e:
-        print(f"Error reading DS18B20 raw data: {e}")
-        return None
-
-def get_ds18b20_temperature(device_file):
-    """Read temperature from specific DS18B20 sensor"""
-    try:
-        lines = read_ds18b20_raw(device_file)
-        if lines is None:
-            return None
-            
-        # Wait for valid data
-        retries = 0
-        while lines[0].strip()[-3:] != 'YES' and retries < 5:
-            time.sleep(0.2)
-            lines = read_ds18b20_raw(device_file)
-            retries += 1
-            if lines is None:
-                return None
+def get_dht_data():
+    """Reads DHT sensor data, handles common errors, and returns a dictionary."""
+    if dhtDevice is None:
+        # If initialization failed, skip read attempt
+        return {"status": "DHT_INIT_FAILED", "message": "Check the SENSOR_TYPE setting and BCM 17 wiring."}
         
-        if lines[0].strip()[-3:] == 'YES':
-            equals_pos = lines[1].find('t=')
-            if equals_pos != -1:
-                temp_string = lines[1][equals_pos+2:]
-                temperature_c = float(temp_string) / 1000.0
-                return temperature_c
-        
-        return None
-    except Exception as e:
-        print(f"Error processing DS18B20 data: {e}")
-        return None
-
-def get_dht11_data():
-    """Reads DHT11 sensor and returns data"""
-    data = {
-        "temperature_c": None,
-        "humidity": None,
-        "status": "ERROR"
-    }
-
     try:
+        # Read the sensor data
         temperature_c = dhtDevice.temperature
         humidity = dhtDevice.humidity
 
+        # Check if readings are valid (sometimes they return None)
         if temperature_c is not None and humidity is not None:
-            data = {
+            # Data is valid, construct the dictionary
+            return {
                 "temperature_c": round(temperature_c, 1),
                 "temperature_f": round(temperature_c * (9 / 5) + 32, 1),
                 "humidity": round(humidity, 1),
                 "status": "OK"
             }
         else:
-            data["status"] = "READ_FAILED"
+            # Data read failed (e.g., checksum error - very common)
+            return {"status": "READ_FAILED", "message": "Sensor data was 'None', retry needed."}
 
     except RuntimeError as error:
-        data["status"] = "RUNTIME_ERROR"
-        data["message"] = str(error)
+        # Specific hardware timing error (common with DHT, safe to ignore and retry)
+        return {"status": "RUNTIME_ERROR", "message": str(error)}
+        
     except Exception as e:
-        data["status"] = "UNEXPECTED_ERROR"
-        data["message"] = str(e)
+        # Catch any other unexpected errors
+        traceback.print_exc()
+        return {"status": "UNEXPECTED_ERROR", "message": str(e)}
 
-    return data
+def get_ds18b20_data():
+    """Reads DS18B20 sensor data from the One-Wire file system."""
+    
+    # 1. Find the sensor file path 
+    base_dir = '/sys/bus/w1/devices/'
+    # Finds the folder that starts with '28-' (the DS18B20 family code)
+    device_folder = glob.glob(base_dir + '28*')
+    
+    if not device_folder:
+        return {"status": "DS18B20_NOT_FOUND", "message": "Ensure One-Wire is enabled and BCM 4 wiring/resistor is correct."}
 
-def get_all_sensor_data():
-    """Read data from all sensors and return combined JSON"""
-    # Find DS18B20 sensors
-    ds18b20_sensors = find_ds18b20_sensors()
+    device_file = device_folder[0] + '/w1_slave'
     
-    # Read DHT11 data
-    dht_data = get_dht11_data()
-    
-    # Read DS18B20 data
-    ds18b20_data = {}
-    for sensor_id, device_file in ds18b20_sensors.items():
-        temp_c = get_ds18b20_temperature(device_file)
-        if temp_c is not None:
-            ds18b20_data[sensor_id] = {
-                "temperature_c": round(temp_c, 2),
-                "temperature_f": round(temp_c * (9 / 5) + 32, 2),
+    # 2. Read and parse the data
+    try:
+        # Attempt to read the file contents
+        with open(device_file, 'r') as f:
+            lines = f.readlines()
+
+        # Check if the CRC is OK ('YES')
+        if lines[0].strip()[-3:] != 'YES':
+             # Re-read if CRC check failed
+             time.sleep(0.2)
+             with open(device_file, 'r') as f:
+                lines = f.readlines()
+                if lines[0].strip()[-3:] != 'YES':
+                    return {"status": "DS18B20_CRC_ERROR", "message": "CRC check failed after retry."}
+
+
+        temp_line = lines[1]
+        equal_pos = temp_line.find('t=')
+        
+        if equal_pos != -1:
+            temp_string = temp_line[equal_pos+2:]
+            temp_c = float(temp_string) / 1000.0
+            
+            # Success
+            return {
+                "temperature_c": round(temp_c, 1),
+                "temperature_f": round(temp_c * (9 / 5) + 32, 1),
                 "status": "OK"
             }
         else:
-            ds18b20_data[sensor_id] = {
-                "temperature_c": None,
-                "temperature_f": None,
-                "status": "READ_FAILED"
-            }
-    
-    # Combine all data
-    combined_data = {
-        "id": SENSOR_ID,
-        "timestamp": time.time(),
-        "dht11": dht_data,
-        "ds18b20": ds18b20_data,
-        "sensor_count": {
-            "dht11": 1,
-            "ds18b20": len(ds18b20_sensors)
-        }
-    }
-    
-    return combined_data
+            # Temperature parsing failed
+            return {"status": "DS18B20_PARSE_ERROR", "message": "Could not find 't=' in sensor file data."}
 
-def setup_one_wire():
-    """Enable One-Wire interface if not already enabled"""
-    try:
-        # Check if One-Wire devices are detected
-        if not glob.glob(ONE_WIRE_BASE_DIR + '28*'):
-            print("⚠️  No DS18B20 sensors found. Please ensure:")
-            print("   1. One-Wire is enabled in raspi-config")
-            print("   2. DS18B20 is properly wired (VCC, GND, DATA)")
-            print("   3. 4.7kΩ pull-up resistor between VCC and DATA")
-            return False
-        return True
     except Exception as e:
-        print(f"Error setting up One-Wire: {e}")
-        return False
+        return {"status": "DS18B20_READ_ERROR", "message": str(e)}
+
 
 if __name__ == '__main__':
-    print("--- Raspberry Pi Multi-Sensor Station ---")
-    print("Initializing sensors...")
+    print(f"--- Raspberry Pi Multi-Sensor Station Initialized ---")
+    print(f"DHT Sensor Type: {SENSOR_TYPE.__name__} | Data Pin: BCM {DHT_PIN.id} (Physical Pin 11)")
+    print(f"DS18B20 Sensor uses One-Wire bus (Data Pin: BCM 4 / Physical Pin 7).")
     
-    # Setup One-Wire interface
-    one_wire_ready = setup_one_wire()
-    
-    if one_wire_ready:
-        ds18b20_sensors = find_ds18b20_sensors()
-        print(f"✅ Found {len(ds18b20_sensors)} DS18B20 sensor(s)")
-        for sensor_id in ds18b20_sensors.keys():
-            print(f"   - {sensor_id}")
-    else:
-        print("❌ No DS18B20 sensors detected")
-    
-    print("✅ DHT11 sensor initialized")
-    print("-" * 50)
-
     try:
         while True:
-            # Read all sensors
-            sensor_data = get_all_sensor_data()
+            # 1. Read DHT Sensor
+            dht_data = get_dht_data()
             
-            # Convert to JSON
-            json_output = json.dumps(sensor_data, indent=2)
+            # 2. Read DS18B20 Sensor
+            ds_data = get_ds18b20_data()
             
-            # Display results
-            print(f"\n📊 Sensor Readings - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            # 3. Combine results into a single payload
+            combined_payload = {
+                "id": SENSOR_ID,
+                "timestamp": time.time(),
+                "sensors": {
+                    "dht_sensor": dht_data,
+                    "ds18b20": ds_data
+                }
+            }
             
-            # DHT11 results
-            dht_status = sensor_data['dht11']['status']
-            if dht_status == "OK":
-                print(f"✅ DHT11: {sensor_data['dht11']['temperature_c']}°C, " 
-                      f"{sensor_data['dht11']['humidity']}% RH")
-            else:
-                print(f"❌ DHT11: {dht_status}")
+            json_output = json.dumps(combined_payload, indent=2)
             
-            # DS18B20 results
-            for sensor_id, data in sensor_data['ds18b20'].items():
-                if data['status'] == "OK":
-                    print(f"✅ {sensor_id}: {data['temperature_c']}°C")
-                else:
-                    print(f"❌ {sensor_id}: {data['status']}")
-            
-            # Full JSON output
-            print("\n📦 JSON Payload:")
-            print(json_output)
             print("-" * 50)
             
-            # Wait between readings
+            # Provide clear feedback on which sensors passed/failed
+            dht_ok = dht_data.get('status') == "OK"
+            ds_ok = ds_data.get('status') == "OK"
+            
+            if dht_ok and ds_ok:
+                print(f"✅ All Sensors Read Successfully:")
+            else:
+                print(f"❌ Read with Errors/Warnings (DS18B20 Status: {ds_data.get('status')}, DHT Status: {dht_data.get('status')}):")
+                
+            print(json_output)
+
+            # Wait 5 seconds between readings
             time.sleep(5.0)
 
     except KeyboardInterrupt:
-        print("\n🛑 Script stopped by user.")
-        # Clean up
-        dhtDevice.exit()
-        print("Sensor connections cleaned up.")
+        print("\nScript stopped by user.")
+        # Clean up the DHT sensor connection
+        if dhtDevice is not None:
+            dhtDevice.exit() 
